@@ -94,6 +94,9 @@ def get_acl(path: str) -> Optional[str]:
         except subprocess.CalledProcessError as e:
             log.debug(f"Error getting ACL for {path}: {e}")
             return None
+        except OSError as e:
+            log.error(f"The 'getfacl' tool is not available on this system: {e}")
+            sys.exit(1)
     elif platform.system() == "Windows":
         try:
             result = subprocess.run(
@@ -103,6 +106,9 @@ def get_acl(path: str) -> Optional[str]:
         except subprocess.CalledProcessError as e:
             log.debug(f"Error getting ACL for {path}: {e}")
             return None
+        except OSError as e:
+            log.error(f"The 'icacls' tool is not available on this system: {e}")
+            sys.exit(1)
     else:
         log.warning(f"Unsupported operating system: {platform.system()}")
         return None
@@ -121,20 +127,73 @@ def parse_acl(acl_output: str, user: Optional[str], group: Optional[str]) -> Dic
         return permissions
 
     if platform.system() == "Linux":
-        acl_lines = acl_output.strip().split("\n")
-        for line in acl_lines:
-            if line.startswith("#") or not line:  # Skip comments and empty lines
+        owner = None
+        owning_group = None
+        entries = []
+        mask_perms = None
+        for line in acl_output.strip().split("\n"):
+            if line.startswith("# owner:"):
+                owner = line.split(":", 1)[1].strip()
+                continue
+            if line.startswith("# group:"):
+                owning_group = line.split(":", 1)[1].strip()
+                continue
+            if line.startswith("#") or not line:  # Skip other comments and empty lines
                 continue
             parts = line.split(":")
             if len(parts) >= 3:
                 entity_type, entity, perms = parts[0], parts[1], parts[2]
-                if (user and entity == user and entity_type == "user") or (
-                    group and entity == group and entity_type == "group"
-                ) or (not user and not group):
-                    permissions["read"] = "r" in perms
-                    permissions["write"] = "w" in perms
-                    permissions["execute"] = "x" in perms
-                    permissions["full_control"] = "rwx" in perms
+                if entity_type == "mask":
+                    mask_perms = perms
+                else:
+                    entries.append((entity_type, entity, perms))
+
+        def masked(perms):
+            if mask_perms is None:
+                return perms
+            return "".join(c for c in perms if c in mask_perms)
+
+        def combine(perms):
+            permissions["read"] = permissions["read"] or "r" in perms
+            permissions["write"] = permissions["write"] or "w" in perms
+            permissions["execute"] = permissions["execute"] or "x" in perms
+
+        matched = False
+        if user:
+            for entity_type, entity, perms in entries:
+                if entity_type == "user" and entity == "" and user == owner:
+                    combine(perms)
+                    matched = True
+                elif entity_type == "user" and entity == user:
+                    combine(masked(perms))
+                    matched = True
+            if not matched:
+                for entity_type, entity, perms in entries:
+                    if entity_type == "other":
+                        combine(perms)
+                        matched = True
+        elif group:
+            for entity_type, entity, perms in entries:
+                if entity_type == "group" and entity == "" and group == owning_group:
+                    combine(masked(perms))
+                    matched = True
+                elif entity_type == "group" and entity == group:
+                    combine(masked(perms))
+                    matched = True
+            if not matched:
+                for entity_type, entity, perms in entries:
+                    if entity_type == "other":
+                        combine(perms)
+                        matched = True
+        else:
+            for entity_type, entity, perms in entries:
+                if entity_type in ("user", "group") and entity != "":
+                    combine(masked(perms))
+                else:
+                    combine(perms)
+        permissions["full_control"] = (
+            permissions["read"] and permissions["write"] and permissions["execute"]
+        )
     elif platform.system() == "Windows":
         acl_lines = acl_output.strip().split("\n")
         for line in acl_lines:
@@ -264,7 +323,23 @@ def main():
          log.setLevel("DEBUG")
     
     validate_args(args)
-    
+
+    if args.output:
+        output_resolved = os.path.realpath(args.output)
+        if os.path.isfile(args.path):
+            analysed_resolved = [os.path.realpath(args.path)]
+        else:
+            analysed_resolved = [
+                os.path.realpath(item["path"])
+                for item in list_path(args.path, args.patterns)
+            ]
+        if output_resolved in analysed_resolved:
+            log.error(
+                "Refusing to write output over a file that is being analysed: "
+                f"{args.output}"
+            )
+            sys.exit(1)
+
     if args.list:
       results = list_path(args.path, args.patterns)
       if args.output:
@@ -274,11 +349,17 @@ def main():
                 log.info(f"Results saved to: {args.output}")
             except Exception as e:
                 log.error(f"Error writing to output file: {e}")
+                sys.exit(1)
       else:
           print(json.dumps(results, indent=4))
       return
     
     results = analyze_path(args.path, args.patterns, args.user, args.group)
+
+    log.info(f"Analysed {len(results)} path(s).")
+    if not results:
+        log.error("Nothing was analysed: no paths matched.")
+        sys.exit(1)
 
     if args.output:
         try:
@@ -287,6 +368,7 @@ def main():
             log.info(f"Results saved to: {args.output}")
         except Exception as e:
             log.error(f"Error writing to output file: {e}")
+            sys.exit(1)
     else:
        print(json.dumps(results, indent=4))
 

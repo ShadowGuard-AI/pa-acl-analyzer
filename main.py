@@ -162,11 +162,13 @@ def parse_acl(acl_output: str, user: Optional[str], group: Optional[str]) -> Dic
         if user:
             for entity_type, entity, perms in entries:
                 if entity_type == "user" and entity == "" and user == owner:
+                    # The owner entry is the one place I deliberately do not apply the mask: POSIX leaves owner permissions unmasked, while the named user entry just below goes through masked(). Swapping those two would misreport both.
                     combine(perms)
                     matched = True
                 elif entity_type == "user" and entity == user:
                     combine(masked(perms))
                     matched = True
+            # Once any user entry matches I stop here, and I never consult the groups this user belongs to at all. A user whose only real access comes through a group entry falls through to the other entry below and is reported with that, which understates group granted access.
             if not matched:
                 for entity_type, entity, perms in entries:
                     if entity_type == "other":
@@ -186,6 +188,7 @@ def parse_acl(acl_output: str, user: Optional[str], group: Optional[str]) -> Dic
                         combine(perms)
                         matched = True
         else:
+            # With neither user nor group named I union every entry in the ACL into one result. That is a summary of what the ACL grants to anyone, not the effective access of any single principal, and it will show full control for a file where no one principal holds all three letters.
             for entity_type, entity, perms in entries:
                 if entity_type in ("user", "group") and entity != "":
                     combine(masked(perms))
@@ -211,6 +214,7 @@ def parse_acl(acl_output: str, user: Optional[str], group: Optional[str]) -> Dic
 
              if user and user.lower() == entity.lower():
                  perms = parts[1].strip()
+                 # On the Windows side I assign instead of combining, so when icacls prints several lines for the same principal the last line wins and wipes whatever the earlier lines granted. The split above also assumes the principal name has no spaces, which names like a domain group with a space in it break.
                  permissions["read"] = "R" in perms
                  permissions["write"] = "W" in perms
                  permissions["execute"] = "X" in perms
@@ -260,6 +264,7 @@ def analyze_path(path: str, patterns: str, user: Optional[str], group: Optional[
                      }
                  )
 
+    # This second walk is how directories get in at all, since the first walk only visits files. The starting directory itself appears in neither walk as an entry, so the root of the analysed tree never gets a row of its own.
     for root, dirs, _ in os.walk(path):
         for dirname in dirs:
              dir_path = os.path.join(root, dirname)
@@ -279,6 +284,7 @@ def match_path(patterns: str, path:str) -> bool:
     """Check if a given path matches the provided path patterns using pathspec."""
     try:
         path_patterns = patterns.split(',')
+        # I rebuild the whole PathSpec for every single path I test. That keeps match_path stateless, at the cost of reparsing the same patterns once per file on a large tree.
         spec = PathSpec.from_lines('gitwildmatch', path_patterns)
         return spec.match_file(path)
     except Exception as e:

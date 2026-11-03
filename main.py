@@ -22,7 +22,7 @@ def setup_argparse():
     """Sets up the command-line argument parser."""
     parser = argparse.ArgumentParser(
         description="Analyzes file system access control lists (ACLs) and reports on effective permissions.",
-        epilog="Example usage: python main.py --path /home/user --user testuser --output output.json",
+        epilog="Example usage: python3 main.py --path /home/user --user testuser --output output.json",
     )
 
     parser.add_argument(
